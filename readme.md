@@ -1,21 +1,4 @@
-# Repository: todo-gamble-app
-# ├─ README.md
-# ├─ requirements.txt
-# ├─ .gitignore
-# ├─ TodoGamble.spec
-# └─ app/
-#    ├─ main.py           # Tkinter UI w/ Today + History + Settings
-#    ├─ models.py         # Task dataclass (+ due_at)
-#    ├─ storage.py        # Persistence (tasks + ledger + history + settings)
-#    ├─ app_state.py      # In-memory state + actions + window/forfeit logic
-#    └─ assets/
-#       └─ icon.ico       # (Optional) provide your own; or generate via tools/make_icon.py
-#    └─ tools/
-#       └─ make_icon.py   # Quick script to generate a placeholder ICO
 
-# =============================
-# File: README.md
-# =============================
 
 # Todo Gamble App (Starter + History + Window)
 
