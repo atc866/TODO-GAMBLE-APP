@@ -114,3 +114,28 @@ class AppState:
     def _retro_process_overdue(self) -> None:
         # Called on startup to catch any tasks that missed their window while app was closed
         self.forfeit_overdue()
+    
+    def record_purchase(self, description: str, amount: float) -> None:
+        """Subtracts from balance and logs to history as a 'purchase' event."""
+        if not description.strip():
+            raise ValueError("Description is required")
+        try:
+            amt = float(amount)
+        except Exception:
+            raise ValueError("Amount must be a number")
+        if amt <= 0:
+            raise ValueError("Purchase amount must be positive")
+
+        # Ledger: negative amount
+        self.balance = storage.append_ledger_entry({
+            "type": "purchase",
+            "description": description.strip(),
+            "amount": -amt,
+        })
+        # History: keep schema compatible with table (buy_in/payout columns)
+        storage.append_history({
+            "event": "purchase",
+            "description": description.strip(),
+            "buy_in": 0.0,
+            "payout": -amt,
+        })

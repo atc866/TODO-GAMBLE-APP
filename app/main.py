@@ -1,10 +1,11 @@
 from __future__ import annotations
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 from datetime import datetime, timedelta
 import platform, subprocess, os  # <-- add this
 from .app_state import AppState
 from . import storage
+import csv 
 
 
 REFRESH_MS = 60 * 1000  # check once per minute for window & forfeits
@@ -30,6 +31,7 @@ class App(tk.Tk):
     def _build_menu(self) -> None:
         menubar = tk.Menu(self)
         filemenu = tk.Menu(menubar, tearoff=0)
+        filemenu.add_command(label="Record Purchase…", command=self._on_record_purchase)
         filemenu.add_command(label="Open Data Folder", command=self._open_data_folder) 
         filemenu.add_command(label="Exit", command=self.destroy)
         menubar.add_cascade(label="File", menu=filemenu)
@@ -47,6 +49,7 @@ class App(tk.Tk):
         self.balance_var = tk.StringVar(value="$0.00")
         ttk.Label(header, textvariable=self.balance_var, font=("Segoe UI", 14, "bold")).pack(side=tk.LEFT, padx=(6, 12))
 
+        ttk.Button(header, text="Record Purchase…", command=self._on_record_purchase).pack(side=tk.LEFT, padx=(0, 12))
         self.window_var = tk.StringVar()
         ttk.Label(header, textvariable=self.window_var).pack(side=tk.LEFT)
 
@@ -106,8 +109,19 @@ class App(tk.Tk):
     def _build_history(self, parent: ttk.Frame) -> None:
         top = ttk.Frame(parent, padding=(12, 10))
         top.pack(fill=tk.X)
+        ttk.Label(top, text="Filter:").pack(side=tk.LEFT)
+        self.history_filter_var = tk.StringVar(value="All")
+        self.history_filter = ttk.Combobox(
+            top, textvariable=self.history_filter_var,
+            values=["All", "Tasks Only", "Purchases Only"], width=16, state="readonly"
+        )
+        self.history_filter.pack(side=tk.LEFT, padx=(6, 12))
+        self.history_filter.bind("<<ComboboxSelected>>", lambda e: self._refresh_history_table())
+
+        # Buttons
         ttk.Button(top, text="Open Data Folder", command=self._open_data_folder).pack(side=tk.LEFT)
-        ttk.Button(top, text="Purge Now (Monday clean)", command=self._on_purge_history).pack(side=tk.RIGHT)
+        ttk.Button(top, text="Export CSV", command=self._on_export_history_csv).pack(side=tk.RIGHT)
+        ttk.Button(top, text="Purge Now (Monday clean)", command=self._on_purge_history).pack(side=tk.RIGHT, padx=(6,0))
 
         table_frame = ttk.Frame(parent, padding=(12, 0))
         table_frame.pack(fill=tk.BOTH, expand=True)
@@ -223,8 +237,18 @@ class App(tk.Tk):
     def _refresh_history_table(self) -> None:
         for row in self.h_tree.get_children():
             self.h_tree.delete(row)
-        for obj in storage.read_history():
-            self.h_tree.insert("", tk.END, values=(obj.get("ts",""), obj.get("event",""), obj.get("description",""), f"{obj.get('buy_in', 0):.2f}", f"{obj.get('payout', 0):.2f}"))
+        rows = self._filter_history_rows(storage.read_history())
+        for obj in rows:
+            self.h_tree.insert(
+                "", tk.END,
+                values=(
+                    obj.get("ts",""),
+                    obj.get("event",""),
+                    obj.get("description",""),
+                    f"{float(obj.get('buy_in', 0.0)):.2f}",
+                    f"{float(obj.get('payout', 0.0)):.2f}",
+                )
+            )
 
     def _refresh_balance(self) -> None:
         self.balance_var.set(f"${self.state.balance:,.2f}")
@@ -251,6 +275,62 @@ class App(tk.Tk):
                 subprocess.run(["xdg-open", str(path)], check=False)
         except Exception as e:
             messagebox.showerror("Open Data Folder", f"Could not open data folder:\n{e}")
+    def _on_record_purchase(self) -> None:
+        desc = simpledialog.askstring("Record Purchase", "What did you buy?", parent=self)
+        if desc is None:
+            return
+        amt = simpledialog.askstring("Record Purchase", "Amount (e.g., 12.34)", parent=self)
+        if amt is None:
+            return
+        try:
+            amount = float(amt)
+            self.state.record_purchase(desc, amount)
+        except ValueError as e:
+            messagebox.showerror("Invalid input", str(e))
+            return
+        self._refresh_balance()
+        self._refresh_history_table()
+        messagebox.showinfo("Recorded", f"Purchase recorded: -${amount:,.2f}")
+
+    def _on_export_history_csv(self) -> None:
+        # Choose destination file
+        default_name = f"todo_gamble_history_{datetime.now().strftime('%Y%m%d')}.csv"
+        path = filedialog.asksaveasfilename(
+            title="Export History CSV",
+            defaultextension=".csv",
+            initialfile=default_name,
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+
+        # Gather filtered history
+        data = storage.read_history()
+        filtered = self._filter_history_rows(data)
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["ts", "event", "description", "buy_in", "payout"])
+                for obj in filtered:
+                    w.writerow([
+                        obj.get("ts", ""),
+                        obj.get("event", ""),
+                        obj.get("description", ""),
+                        f"{float(obj.get('buy_in', 0.0)):.2f}",
+                        f"{float(obj.get('payout', 0.0)):.2f}",
+                    ])
+            messagebox.showinfo("Exported", f"History exported to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+    def _filter_history_rows(self, rows):
+        mode = (self.history_filter_var.get() if hasattr(self, "history_filter_var") else "All")
+        if mode == "Purchases Only":
+            return [r for r in rows if r.get("event") == "purchase"]
+        if mode == "Tasks Only":
+            return [r for r in rows if r.get("event") in ("completed", "forfeited")]
+        return rows
+
+
 
 
 if __name__ == "__main__":
@@ -281,6 +361,7 @@ def main():
     imgs = [img.resize(s) for s in sizes]
     imgs[0].save(dst, format='ICO', sizes=sizes)
     print(f"Wrote {dst}")
+
 
 if __name__ == '__main__':
     try:
