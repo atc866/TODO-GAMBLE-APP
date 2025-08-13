@@ -67,5 +67,15 @@ jobs:
           name: TodoGamble-dist
           path: dist/
 ```
+## Background mode & notifications (dev on macOS)
+- System tray/menu bar icon appears when the app starts. Closing the window hides it to tray (keeps running).
+- Notifications:
+  - macOS: uses `osascript` to display native Notification Center toasts.
+  - Windows: uses `winotify` (install when testing on Windows).
+- To test: run `python -m app.main`, set a near-term creation window in **Settings**, and watch for:
+  - A notification when the window opens
+  - A 10-minute-left warning
+  - A “Tasks Forfeited” toast at window end if any pending remain
+
 
 ---

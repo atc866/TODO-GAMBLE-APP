@@ -2,13 +2,16 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from datetime import datetime, timedelta
-import platform, subprocess, os  # <-- add this
+
+import platform, subprocess, os  # already suggested before
+from pathlib import Path
+from datetime import datetime, timedelta
 from .app_state import AppState
 from . import storage
+from .tray import TrayManager
+from .notifications import Notifier
 
-
-REFRESH_MS = 60 * 1000  # check once per minute for window & forfeits
-
+REFRESH_MS = 60 * 1000 
 
 class App(tk.Tk):
     def __init__(self) -> None:
@@ -18,6 +21,24 @@ class App(tk.Tk):
         self.minsize(760, 480)
         self.state = AppState()
 
+        # Notifications & tray
+        self.notifier = Notifier()
+        app_root = Path(__file__).resolve().parents[0]
+        self.tray = TrayManager(
+            app_root=app_root,
+            on_show=self._show_from_tray,
+            on_quit=self._quit_app
+        )
+        self.tray.start()
+
+        # Remember what we’ve notified today to avoid duplicates
+        self._notified_day_key: str | None = None  # e.g., "2025-08-13"
+        self._notified_open = False
+        self._notified_pre_end = False
+
+        # override close to hide to tray
+        self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+
         self._build_menu()
         self._build_header()
         self._build_tabs()
@@ -25,13 +46,17 @@ class App(tk.Tk):
 
         # Periodic checks: window status + forfeits + Monday purge
         self.after(2000, self._tick)
+        self._last_tick: datetime = datetime.now()
 
     # ---------- UI ----------
     def _build_menu(self) -> None:
         menubar = tk.Menu(self)
         filemenu = tk.Menu(menubar, tearoff=0)
-        filemenu.add_command(label="Open Data Folder", command=self._open_data_folder) 
-        filemenu.add_command(label="Exit", command=self.destroy)
+        filemenu.add_command(label="Open Data Folder", command=self._open_data_folder)
+        filemenu.add_command(label="Minimize to Tray", command=self._hide_to_tray)  # <-- new
+        filemenu.add_command(label="Send Test Notification", command=self._send_test_notification)
+        filemenu.add_separator()
+        filemenu.add_command(label="Exit", command=self._quit_app)
         menubar.add_cascade(label="File", menu=filemenu)
 
         settingsmenu = tk.Menu(menubar, tearoff=0)
@@ -188,20 +213,54 @@ class App(tk.Tk):
             storage.HISTORY_PATH.unlink(missing_ok=True)
         self._refresh_history_table()
 
-    # ---------- Periodic ----------
     def _tick(self) -> None:
-        # Forfeit overdue tasks, refresh balance/table/history
+        last = self._last_tick
+        now = datetime.now()
+        self._last_tick = now
+
+        # 1) Forfeit overdue tasks
         forfeited = self.state.forfeit_overdue()
         if forfeited:
             self._refresh_table()
             self._refresh_balance()
             self._refresh_history_table()
-        # Monday purge (no-op if not Monday)
+            self.notifier.notify("Tasks Forfeited", f"{forfeited} task(s) forfeited at window end.")
+
+        # 2) Monday purge (no-op if not Monday)
         if storage.purge_history_if_monday():
             self._refresh_history_table()
+
+        # 3) Window status + notifications
         self._refresh_add_enabled()
         self._refresh_window_label()
+
+        # Reset daily flags at midnight
+        today_key = now.strftime("%Y-%m-%d")
+        if self._notified_day_key != today_key:
+            self._notified_day_key = today_key
+            self._notified_open = False
+            self._notified_pre_end = False
+
+        start, end = self.state.window_today()
+        pre_end = end - timedelta(minutes=10)
+
+        # Fire when crossing start boundary
+        if not self._notified_open and last < start <= now:
+            self._notified_open = True
+            self.notifier.notify("Task window open", f"You can create tasks until {end.strftime('%I:%M %p').lstrip('0')}.")
+
+        # Fire when crossing 10-min-before-end boundary
+        if not self._notified_pre_end and last < pre_end <= now:
+            self._notified_pre_end = True
+            self.notifier.notify("10 minutes left", "Finish or mark tasks complete to avoid forfeits.")
+
+        # If app starts while already inside the window, notify once
+        if not self._notified_open and start <= now <= end:
+            self._notified_open = True
+            self.notifier.notify("Task window open", f"You can create tasks until {end.strftime('%I:%M %p').lstrip('0')}.")
+
         self.after(REFRESH_MS, self._tick)
+
 
     # ---------- Helpers ----------
     def _refresh_all(self) -> None:
@@ -251,6 +310,34 @@ class App(tk.Tk):
                 subprocess.run(["xdg-open", str(path)], check=False)
         except Exception as e:
             messagebox.showerror("Open Data Folder", f"Could not open data folder:\n{e}")
+
+    def _hide_to_tray(self) -> None:
+        try:
+            self.withdraw()  # hides window, keeps mainloop alive
+            # Tiny toast to confirm background mode
+            self.notifier.notify("Todo Gamble", "Running in background (tray).")
+        except Exception:
+            self.withdraw()
+
+    def _show_from_tray(self) -> None:
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+
+    def _quit_app(self) -> None:
+        try:
+            self.tray.stop()
+        except Exception:
+            pass
+        self.destroy()
+    def _send_test_notification(self) -> None:
+        try:
+            self.notifier.notify("Test Notification", "If you see this, notifications are working.")
+        except Exception as e:
+            messagebox.showerror("Notification Error", str(e))
 
 
 if __name__ == "__main__":

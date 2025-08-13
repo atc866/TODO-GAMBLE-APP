@@ -1,0 +1,4 @@
+pystray
+Pillow
+# Windows-only toast lib; harmless on mac/linux if not imported at runtime
+winotify; platform_system=="Windows"
