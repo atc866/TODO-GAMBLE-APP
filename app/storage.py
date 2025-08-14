@@ -137,3 +137,115 @@ def compute_balance() -> float:
     except Exception:
         return 0.0
     return round(total, 2)
+
+
+    from datetime import datetime, timezone, timedelta
+
+def _parse_ts(iso: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(iso)
+    except Exception:
+        try:
+            # fallback: strip Z if present
+            return datetime.fromisoformat(iso.replace("Z",""))
+        except Exception:
+            return None
+
+def compact_ledger(retain_days: int = 30) -> int:
+    """
+    Keep only the last `retain_days` of entries. If older entries exist,
+    we write a single 'snapshot' line that preserves the balance up to the
+    cutoff, then append all lines newer than cutoff.
+    Returns number of lines written after compaction.
+    """
+    ensure_dirs()
+    if not LEDGER_PATH.exists():
+        return 0
+
+    now = datetime.now(timezone.utc).astimezone()
+    cutoff = now - timedelta(days=retain_days)
+
+    lines = LEDGER_PATH.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return 0
+
+    # Partition entries by ts
+    older_total = 0.0
+    newer_lines: list[str] = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            obj = json.loads(ln)
+        except Exception:
+            continue
+        ts = _parse_ts(obj.get("ts", "")) or now
+        amt = float(obj.get("amount", 0.0))
+        if ts < cutoff:
+            older_total += amt
+        else:
+            newer_lines.append(json.dumps(obj))
+
+    # If nothing to compact, bail
+    if not newer_lines and older_total == 0.0:
+        return len(lines)
+
+    # Build snapshot + rewrite file atomically
+    tmp = LEDGER_PATH.with_suffix(".tmp")
+    balance_before = 0.0
+    # Compute the balance at cutoff = sum(older_total)
+    balance_before = round(older_total, 2)
+
+    # Write a snapshot that encodes the carry-forward balance
+    snapshot = {
+        "ts": now_iso(),
+        "type": "snapshot",
+        "description": f"Carry-forward balance after compacting to last {retain_days} days",
+        "amount": 0.0,
+        "balance": balance_before
+    }
+    out_lines = [json.dumps(snapshot)] + newer_lines
+
+    tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    tmp.replace(LEDGER_PATH)
+    return len(out_lines)
+
+def purge_data(save_balance: bool = True) -> None:
+    """
+    Purge storage files to save space.
+    - Always deletes history.jsonl and tasks.json (pending tasks).
+    - Ledger:
+        * If save_balance=True, replace ledger.txt with a single 'snapshot' line preserving current balance.
+        * If save_balance=False, delete ledger.txt (balance resets to $0).
+    Settings are untouched.
+    """
+    ensure_dirs()
+
+    # Delete history and tasks
+    try:
+        HISTORY_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        TASKS_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    if save_balance:
+        bal = compute_balance()
+        snapshot = {
+            "ts": now_iso(),
+            "type": "snapshot",
+            "description": "Snapshot after purge",
+            "amount": 0.0,
+            "balance": round(bal, 2),
+        }
+        tmp = LEDGER_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(snapshot) + "\n", encoding="utf-8")
+        tmp.replace(LEDGER_PATH)
+    else:
+        try:
+            LEDGER_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass

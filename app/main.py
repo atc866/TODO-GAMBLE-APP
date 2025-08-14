@@ -18,7 +18,8 @@ class App(tk.Tk):
         self.geometry("840x560")
         self.minsize(760, 480)
         self.state = AppState()
-
+        self._history_row_data = {}  # iid -> dict from history.jsonl
+        self._history_selected_iid = None
         self._build_menu()
         self._build_header()
         self._build_tabs()
@@ -34,6 +35,10 @@ class App(tk.Tk):
         filemenu.add_command(label="Record Purchase…", command=self._on_record_purchase)
         filemenu.add_command(label="Open Data Folder", command=self._open_data_folder) 
         filemenu.add_command(label="Exit", command=self.destroy)
+        filemenu.add_separator()
+        filemenu.add_command(label="Purge Data…", command=self._on_purge_data)          # new
+        filemenu.add_command(label="Compact Ledger…", command=self._on_compact_ledger)  # new
+        filemenu.add_separator()
         menubar.add_cascade(label="File", menu=filemenu)
 
         settingsmenu = tk.Menu(menubar, tearoff=0)
@@ -50,6 +55,7 @@ class App(tk.Tk):
         ttk.Label(header, textvariable=self.balance_var, font=("Segoe UI", 14, "bold")).pack(side=tk.LEFT, padx=(6, 12))
 
         ttk.Button(header, text="Record Purchase…", command=self._on_record_purchase).pack(side=tk.LEFT, padx=(0, 12))
+        
         self.window_var = tk.StringVar()
         ttk.Label(header, textvariable=self.window_var).pack(side=tk.LEFT)
 
@@ -122,6 +128,7 @@ class App(tk.Tk):
         ttk.Button(top, text="Open Data Folder", command=self._open_data_folder).pack(side=tk.LEFT)
         ttk.Button(top, text="Export CSV", command=self._on_export_history_csv).pack(side=tk.RIGHT)
         ttk.Button(top, text="Purge Now (Monday clean)", command=self._on_purge_history).pack(side=tk.RIGHT, padx=(6,0))
+        ttk.Button(top, text="Revert Selected…", command=self._on_history_revert).pack(side=tk.LEFT, padx=(8, 0))
 
         table_frame = ttk.Frame(parent, padding=(12, 0))
         table_frame.pack(fill=tk.BOTH, expand=True)
@@ -139,6 +146,16 @@ class App(tk.Tk):
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.h_tree.yview)
         self.h_tree.configure(yscrollcommand=vsb.set)
         vsb.pack(fill=tk.Y, side=tk.RIGHT)
+        # Context menu for revert — parented to the tree to avoid focus weirdness
+        self.h_context = tk.Menu(self.h_tree, tearoff=0)
+        self.h_context.add_command(label="Revert…", command=self._on_history_revert)
+
+        # Bind common right-click variants across OSes:
+        # - Windows/Linux: Button-3 (press & release)
+        # - mac trackpad: Button-2 (press & release)
+        # - mac control-click: Control-Button-1
+        for seq in ("<Button-3>", "<ButtonRelease-3>", "<Button-2>", "<ButtonRelease-2>", "<Control-Button-1>"):
+            self.h_tree.bind(seq, self._on_history_context, add="+")
 
     # ---------- Events ----------
     def _on_set_window(self) -> None:
@@ -233,14 +250,19 @@ class App(tk.Tk):
 
     def _insert_task_row(self, t) -> None:
         self.tree.insert("", tk.END, iid=t.id, values=(t.description, f"{t.buy_in:.2f}", f"{t.payout:.2f}"))
-
+    
     def _refresh_history_table(self) -> None:
+        # clear table + mapping
         for row in self.h_tree.get_children():
             self.h_tree.delete(row)
+        self._history_row_data.clear()
+
         rows = self._filter_history_rows(storage.read_history())
-        for obj in rows:
+        for idx, obj in enumerate(rows):
+            iid = f"h{idx}"
+            self._history_row_data[iid] = obj
             self.h_tree.insert(
-                "", tk.END,
+                "", tk.END, iid=iid,
                 values=(
                     obj.get("ts",""),
                     obj.get("event",""),
@@ -329,6 +351,126 @@ class App(tk.Tk):
         if mode == "Tasks Only":
             return [r for r in rows if r.get("event") in ("completed", "forfeited")]
         return rows
+    def _on_history_context(self, event) -> None:
+        # Identify row under cursor
+        row_id = self.h_tree.identify_row(event.y)
+        if not row_id:
+            return
+        # Focus + select the row that was clicked
+        self.h_tree.focus(row_id)
+        self.h_tree.selection_set(row_id)
+        self._history_selected_iid = row_id
+        try:
+            # Some Tk builds prefer tk_popup with a default index arg
+            self.h_context.tk_popup(event.x_root, event.y_root, 0)
+        finally:
+            # Always release the grab so other widgets remain responsive
+            try:
+                self.h_context.grab_release()
+            except Exception:
+                pass
+
+    def _on_history_revert(self) -> None:
+        iid = self._history_selected_iid
+        if not iid or iid not in self._history_row_data:
+            messagebox.showinfo("Revert", "Select a history row to revert.")
+            return
+        obj = self._history_row_data[iid]
+        event = (obj.get("event") or "").lower()
+
+        if event == "purchase":
+            desc = obj.get("description", "")
+            amt = abs(float(obj.get("payout", 0.0)))  # payout is stored negative for purchases
+            if not messagebox.askyesno("Refund purchase?", f"Refund this purchase?\n\n{desc}\n${amt:.2f}"):
+                return
+            try:
+                self.state.revert_purchase(desc, amt)
+            except Exception as e:
+                messagebox.showerror("Revert failed", str(e))
+                return
+            self._refresh_balance()
+            self._refresh_history_table()
+            messagebox.showinfo("Reverted", f"Refunded ${amt:.2f} for: {desc}")
+            return
+
+        if event in ("completed", "forfeited"):
+            # Build a snapshot for restore
+            snap = {
+                "id": obj.get("task_id") or obj.get("id"),
+                "task_id": obj.get("task_id"),
+                "description": obj.get("description", ""),
+                "buy_in": float(obj.get("buy_in", 0.0)),
+                "payout": float(obj.get("payout", 0.0)),
+            }
+            restore = messagebox.askyesno(
+                "Revert",
+                "Also restore this task back to Pending?\n\n"
+                f"{snap['description']}\n"
+                f"Buy-in ${snap['buy_in']:.2f} | Payout ${snap['payout']:.2f}"
+            )
+            try:
+                if event == "completed":
+                    self.state.revert_completion(snap, restore=restore)
+                else:
+                    self.state.revert_forfeit(snap, restore=restore)
+            except Exception as e:
+                messagebox.showerror("Revert failed", str(e))
+                return
+            self._refresh_balance()
+            self._refresh_history_table()
+            if restore:
+                self._refresh_table()
+            messagebox.showinfo("Reverted", f"Reverted {event} for: {snap['description']}")
+            return
+
+        # Other events (refund, reverted_*) — no-op or future support
+        messagebox.showinfo("Revert", "This history event type cannot be reverted.")
+    
+    def _on_purge_data(self) -> None:
+        msg = (
+            "Purge Data will remove:\n"
+            " • History (all)\n"
+            " • Pending Tasks\n\n"
+            "Ledger options:\n"
+            " • Keep balance (ledger becomes a 1-line snapshot), or\n"
+            " • Reset balance to $0 (delete ledger)\n\n"
+            "Do you want to KEEP your current balance?"
+        )
+        keep = messagebox.askyesno("Purge Data", msg, icon="warning")
+        try:
+            storage.purge_data(save_balance=keep)
+            # Refresh in-memory state
+            self.state.tasks = []
+            self.state.balance = storage.compute_balance()
+            self._refresh_balance()
+            self._refresh_table()
+            self._refresh_history_table()
+            messagebox.showinfo("Purge complete",
+                                f"Data purged. Balance is now ${self.state.balance:,.2f}.")
+        except Exception as e:
+            messagebox.showerror("Purge failed", str(e))
+
+    def _on_compact_ledger(self) -> None:
+        # Ask retain days
+        retain = simpledialog.askinteger(
+            "Compact Ledger",
+            "Keep how many days of ledger history? (default 30)",
+            minvalue=1, maxvalue=3650
+        )
+        if retain is None:
+            return
+        try:
+            n = storage.compact_ledger(retain_days=int(retain))
+            # recompute (snapshot may have changed first line)
+            self.state.balance = storage.compute_balance()
+            self._refresh_balance()
+            messagebox.showinfo("Ledger compacted",
+                                f"Ledger compacted to last {retain} days.\nLines now: {n}\n"
+                                f"Balance: ${self.state.balance:,.2f}")
+        except Exception as e:
+            messagebox.showerror("Compact failed", str(e))
+
+
 
 
 

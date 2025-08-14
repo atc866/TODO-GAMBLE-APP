@@ -139,3 +139,104 @@ class AppState:
             "buy_in": 0.0,
             "payout": -amt,
         })
+    
+        # ---------- Reverts / refunds ----------
+    def record_purchase(self, description: str, amount: float) -> None:
+        """(already added earlier)"""
+        amt = float(amount)
+        if amt <= 0:
+            raise ValueError("Purchase amount must be positive.")
+        self.balance = storage.append_ledger_entry({
+            "type": "purchase",
+            "description": description.strip(),
+            "amount": -amt,
+        })
+        storage.append_history({
+            "event": "purchase",
+            "description": description.strip(),
+            "buy_in": 0.0,
+            "payout": -amt,
+        })
+
+    def revert_purchase(self, description: str, amount: float) -> None:
+        """Refund a prior purchase by adding a positive ledger entry and history row."""
+        amt = float(amount)
+        if amt <= 0:
+            raise ValueError("Amount must be positive.")
+        self.balance = storage.append_ledger_entry({
+            "type": "refund",
+            "description": description.strip(),
+            "amount": +amt,
+        })
+        storage.append_history({
+            "event": "refund",
+            "description": description.strip(),
+            "buy_in": 0.0,
+            "payout": +amt,
+        })
+
+    def _restore_task(self, snapshot: dict) -> None:
+        """Restore a task to 'pending' with a fresh due_at (end of today's window)."""
+        from .models import Task
+        # Compute a new due_at: end of today’s creation window
+        _, end_dt = self.window_today()
+        due = end_dt.isoformat()
+        # Try to reuse original id if it doesn't collide; else create a new one
+        orig_id = snapshot.get("id") or snapshot.get("task_id")
+        existing_ids = {t.id for t in self.tasks}
+        if not orig_id or orig_id in existing_ids:
+            # new task with new id
+            t = Task.new(snapshot["description"], float(snapshot["buy_in"]), float(snapshot["payout"]), due_at=due)
+        else:
+            # reuse original id
+            t = Task(
+                id=orig_id,
+                description=snapshot["description"],
+                buy_in=float(snapshot["buy_in"]),
+                payout=float(snapshot["payout"]),
+                status="pending",
+                due_at=due,
+            )
+        self.tasks.append(t)
+        storage.save_tasks(self.tasks)
+
+    def revert_completion(self, task_snapshot: dict, restore: bool = True) -> None:
+        """Reverse a completed task's payout; optionally restore the task."""
+        payout = float(task_snapshot["payout"])
+        self.balance = storage.append_ledger_entry({
+            "type": "revert_payout",
+            "task_id": task_snapshot.get("id") or task_snapshot.get("task_id"),
+            "description": task_snapshot["description"],
+            "amount": -payout,
+        })
+        storage.append_history({
+            "event": "reverted_completion",
+            "task_id": task_snapshot.get("id") or task_snapshot.get("task_id"),
+            "description": task_snapshot["description"],
+            "buy_in": float(task_snapshot["buy_in"]),
+            "payout": float(task_snapshot["payout"]),
+        })
+        if restore:
+            self._restore_task(task_snapshot)
+
+    def revert_forfeit(self, task_snapshot: dict, restore: bool = True) -> None:
+        """Reverse a forfeit (give the buy-in back); optionally restore the task."""
+        buy_in = float(task_snapshot["buy_in"])
+        self.balance = storage.append_ledger_entry({
+            "type": "revert_forfeit",
+            "task_id": task_snapshot.get("id") or task_snapshot.get("task_id"),
+            "description": task_snapshot["description"],
+            "amount": +buy_in,
+        })
+        storage.append_history({
+            "event": "reverted_forfeit",
+            "task_id": task_snapshot.get("id") or task_snapshot.get("task_id"),
+            "description": task_snapshot["description"],
+            "buy_in": float(task_snapshot["buy_in"]),
+            "payout": float(task_snapshot["payout"]),
+        })
+        if restore:
+            self._restore_task(task_snapshot)
+
+    
+   
