@@ -48,6 +48,15 @@ class AppState:
             start_dt = y.replace(hour=start_dt.hour, minute=start_dt.minute, second=0, microsecond=0)
             end_dt = start_dt + (end_dt - (datetime.now().replace(hour=start_dt.hour, minute=start_dt.minute, second=0, microsecond=0)))
         return start_dt <= at <= end_dt
+    def window_for(self, base_date: datetime) -> Tuple[datetime, datetime]:
+        """Creation window for a specific calendar day (local time)."""
+        start_t = self._parse_hhmm(self.settings["creation_window"]["start"])
+        end_t = self._parse_hhmm(self.settings["creation_window"]["end"])
+        start_dt = base_date.replace(hour=start_t.hour, minute=start_t.minute, second=0, microsecond=0)
+        end_dt = base_date.replace(hour=end_t.hour, minute=end_t.minute, second=0, microsecond=0)
+        if end_dt <= start_dt:
+            end_dt = end_dt + timedelta(days=1)
+        return start_dt, end_dt
 
     # ---------- Task lifecycle ----------
     def add_task(self, description: str, buy_in: float, payout: float) -> Task:
@@ -55,11 +64,19 @@ class AppState:
             raise ValueError("Description is required")
         if not self.in_creation_window():
             raise PermissionError("Task creation is only allowed during the creation window.")
-        _, end_dt = self.window_today()
-        t = Task.new(description, buy_in, payout, due_at=end_dt.isoformat())
+
+        now = datetime.now()
+        # compute NEXT day's window end
+        next_day = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        _, next_end = self.window_for(next_day)
+
+        t = Task.new(description, buy_in, payout,
+                    due_at=next_end.isoformat(),
+                    created_at=now.isoformat())
         self.tasks.append(t)
         storage.save_tasks(self.tasks)
         return t
+
 
     def complete_task(self, task_id: str) -> None:
         for i, t in enumerate(self.tasks):
@@ -82,6 +99,70 @@ class AppState:
                 storage.save_tasks(self.tasks)
                 return
         raise KeyError(f"Task not found: {task_id}")
+
+    def delete_task(self, task_id: str) -> dict:
+        """
+        Delete a pending task.
+        - Free if deleted before the next day's creation window starts.
+        - Penalize (-0.5 * buy_in) if deleted during/after the next day's creation window.
+        Returns: {'penalized': bool, 'penalty': float}
+        """
+        now = datetime.now()
+        for i, t in enumerate(self.tasks):
+            if t.id != task_id or t.status != "pending":
+                continue
+
+            # Infer the 'creation day' from due_at (the window end of creation day)
+            # due_at exists for pending tasks created via add_task
+            if not t.due_at:
+                # fallback: if missing, treat as free before today’s window start, penalize otherwise
+                start_today, _ = self.window_today()
+                penalize = start_next <= now <= end_next
+            else:
+                try:
+                    due = datetime.fromisoformat(t.due_at)
+                except Exception:
+                    due = now
+                # Next day's window start
+                next_day = (due + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                start_next, end_next = self.window_for(next_day)
+                # Penalize iff within or after that next-day window (you can narrow to only within by using start_next <= now <= end_next)
+                penalize = start_next <= now
+
+            if penalize:
+                penalty = round(-0.5 * float(t.buy_in), 2)
+                # ledger
+                self.balance = storage.append_ledger_entry({
+                    "type": "delete_penalty",
+                    "task_id": t.id,
+                    "description": t.description,
+                    "amount": penalty,
+                })
+                # history
+                storage.append_history({
+                    "event": "deleted_penalty",
+                    "task_id": t.id,
+                    "description": t.description,
+                    "buy_in": t.buy_in,
+                    "payout": penalty,  # store penalty as negative payout for table display
+                })
+                result = {"penalized": True, "penalty": penalty}
+            else:
+                storage.append_history({
+                    "event": "deleted_free",
+                    "task_id": t.id,
+                    "description": t.description,
+                    "buy_in": t.buy_in,
+                    "payout": 0.0,
+                })
+                result = {"penalized": False, "penalty": 0.0}
+
+            # remove from active
+            self.tasks.pop(i)
+            storage.save_tasks(self.tasks)
+            return result
+
+        raise KeyError(f"Task not found or not pending: {task_id}")
 
     def forfeit_overdue(self) -> int:
         """Forfeit tasks whose due_at <= now. Returns count forfeited."""

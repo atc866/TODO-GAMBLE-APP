@@ -6,6 +6,9 @@ import platform, subprocess, os  # <-- add this
 from .app_state import AppState
 from . import storage
 import csv 
+from .tray import TrayManager
+import threading
+
 
 
 REFRESH_MS = 60 * 1000  # check once per minute for window & forfeits
@@ -24,9 +27,14 @@ class App(tk.Tk):
         self._build_header()
         self._build_tabs()
         self._refresh_all()
+        self._tick_worker_running = False
 
         # Periodic checks: window status + forfeits + Monday purge
         self.after(2000, self._tick)
+
+        #tray
+        self.tray = TrayManager(self)
+        self.tray.start()
 
     # ---------- UI ----------
     def _build_menu(self) -> None:
@@ -111,6 +119,9 @@ class App(tk.Tk):
         actions = ttk.Frame(parent, padding=(12, 8))
         actions.pack(fill=tk.X)
         ttk.Button(actions, text="Mark Selected as Complete", command=self._on_complete).pack(side=tk.LEFT)
+
+        #delete button
+        ttk.Button(actions, text="Delete Selected Task", command=self._on_delete_task).pack(side=tk.LEFT, padx=(8, 0))
 
     def _build_history(self, parent: ttk.Frame) -> None:
         top = ttk.Frame(parent, padding=(12, 10))
@@ -213,6 +224,31 @@ class App(tk.Tk):
         self.tree.delete(item_id)
         self._refresh_balance()
         self._refresh_history_table()
+    def _on_delete_task(self) -> None:
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Nothing selected", "Select a task to delete.")
+            return
+        item_id = sel[0]
+        # Confirm
+        if not messagebox.askyesno("Delete Task", "Delete this task?\n\nNo payout will be earned."):
+            return
+        try:
+            result = self.state.delete_task(item_id)
+        except KeyError as e:
+            messagebox.showerror("Error", str(e))
+            return
+        # Remove row and refresh
+        self.tree.delete(item_id)
+        if result.get("penalized"):
+            self._refresh_balance()
+            self._refresh_history_table()
+            message = f"Task deleted with penalty: ${abs(result['penalty']):.2f}"
+        else:
+            self._refresh_history_table()
+            message = "Task deleted (no penalty)."
+        messagebox.showinfo("Deleted", message)
+
 
     def _on_purge_history(self) -> None:
         if storage.HISTORY_PATH.exists():
@@ -221,18 +257,40 @@ class App(tk.Tk):
 
     # ---------- Periodic ----------
     def _tick(self) -> None:
-        # Forfeit overdue tasks, refresh balance/table/history
-        forfeited = self.state.forfeit_overdue()
-        if forfeited:
-            self._refresh_table()
-            self._refresh_balance()
-            self._refresh_history_table()
-        # Monday purge (no-op if not Monday)
-        if storage.purge_history_if_monday():
-            self._refresh_history_table()
-        self._refresh_add_enabled()
-        self._refresh_window_label()
+    # If a previous worker is still running, skip this tick
+        if self._tick_worker_running:
+            self.after(REFRESH_MS, self._tick)
+            return
+
+        self._tick_worker_running = True
+        threading.Thread(target=self._tick_worker, daemon=True).start()
+        # schedule next tick regardless
         self.after(REFRESH_MS, self._tick)
+
+    def _tick_worker(self) -> None:
+        """Runs off the Tk thread. Do I/O here; marshal UI updates with .after()."""
+        try:
+            # 1) Forfeit overdue tasks (disk I/O)
+            forfeited = self.state.forfeit_overdue()
+            if forfeited:
+                # UI updates must run on the Tk thread
+                self.after(0, self._refresh_table)
+                self.after(0, self._refresh_balance)
+                self.after(0, self._refresh_history_table)
+                # Optional: toast, if you wired Notifier()
+                if hasattr(self, "notifier"):
+                    self.after(0, lambda: self.notifier.notify("Tasks Forfeited", f"{forfeited} task(s) forfeited."))
+
+            # 2) Monday purge (disk I/O)
+            if storage.purge_history_if_monday():
+                self.after(0, self._refresh_history_table)
+
+            # 3) Lightweight UI state updates
+            self.after(0, self._refresh_add_enabled)
+            self.after(0, self._refresh_window_label)
+        finally:
+            self._tick_worker_running = False
+
 
     # ---------- Helpers ----------
     def _refresh_all(self) -> None:
