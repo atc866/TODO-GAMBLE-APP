@@ -67,5 +67,8 @@ jobs:
           name: TodoGamble-dist
           path: dist/
 ```
-
+### Finance & Spending
+- **Record Purchase / Withdrawal**: subtract from balance and log to History (`purchase` event).
+- History tab can **filter**: All, Tasks Only, Purchases Only.
+- **Export CSV** of history for budgeting.
 ---
