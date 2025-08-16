@@ -2,17 +2,19 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from datetime import datetime, timedelta
-import platform, subprocess, os  # <-- add this
+
+import platform, subprocess, os  # already suggested before
+from pathlib import Path
+from datetime import datetime, timedelta
 from .app_state import AppState
 from . import storage
+from .notifications import Notifier
 import csv 
 from .tray import TrayManager
 import threading
 
 
-
-REFRESH_MS = 60 * 1000  # check once per minute for window & forfeits
-
+REFRESH_MS = 60 * 1000 
 
 class App(tk.Tk):
     def __init__(self) -> None:
@@ -21,6 +23,27 @@ class App(tk.Tk):
         self.geometry("840x560")
         self.minsize(760, 480)
         self.state = AppState()
+
+
+        # Notifications & tray
+        self.notifier = Notifier()
+        app_root = Path(__file__).resolve().parents[0]
+        self.tray = TrayManager(
+            app_root=app_root,
+            on_show=self._show_from_tray,
+            on_quit=self._quit_app
+        )
+        self.tray.start()
+
+        # Remember what we’ve notified today to avoid duplicates
+        self._notified_day_key: str | None = None  # e.g., "2025-08-13"
+        self._notified_open = False
+        self._notified_pre_end = False
+
+        # override close to hide to tray
+        self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+
+
         self._history_row_data = {}  # iid -> dict from history.jsonl
         self._history_selected_iid = None
         self._build_menu()
@@ -31,6 +54,7 @@ class App(tk.Tk):
 
         # Periodic checks: window status + forfeits + Monday purge
         self.after(2000, self._tick)
+        self._last_tick: datetime = datetime.now()
 
         #tray
         self.tray = TrayManager(self)
@@ -40,13 +64,17 @@ class App(tk.Tk):
     def _build_menu(self) -> None:
         menubar = tk.Menu(self)
         filemenu = tk.Menu(menubar, tearoff=0)
+
         filemenu.add_command(label="Record Purchase…", command=self._on_record_purchase)
         filemenu.add_command(label="Open Data Folder", command=self._open_data_folder) 
+        filemenu.add_command(label="Minimize to Tray", command=self._hide_to_tray)
         filemenu.add_command(label="Exit", command=self.destroy)
         filemenu.add_separator()
         filemenu.add_command(label="Purge Data…", command=self._on_purge_data)          # new
         filemenu.add_command(label="Compact Ledger…", command=self._on_compact_ledger)  # new
+        filemenu.add_command(label="Send Test Notification", command=self._send_test_notification)
         filemenu.add_separator()
+
         menubar.add_cascade(label="File", menu=filemenu)
 
         settingsmenu = tk.Menu(menubar, tearoff=0)
@@ -255,42 +283,78 @@ class App(tk.Tk):
             storage.HISTORY_PATH.unlink(missing_ok=True)
         self._refresh_history_table()
 
-    # ---------- Periodic ----------
     def _tick(self) -> None:
-    # If a previous worker is still running, skip this tick
-        if self._tick_worker_running:
-            self.after(REFRESH_MS, self._tick)
-            return
+      # Skip if already running
+      if getattr(self, "_tick_worker_running", False):
+          self.after(REFRESH_MS, self._tick)
+          return
 
-        self._tick_worker_running = True
-        threading.Thread(target=self._tick_worker, daemon=True).start()
-        # schedule next tick regardless
-        self.after(REFRESH_MS, self._tick)
+      self._tick_worker_running = True
+      threading.Thread(target=self._tick_worker, daemon=True).start()
+      self.after(REFRESH_MS, self._tick)
 
-    def _tick_worker(self) -> None:
-        """Runs off the Tk thread. Do I/O here; marshal UI updates with .after()."""
-        try:
-            # 1) Forfeit overdue tasks (disk I/O)
-            forfeited = self.state.forfeit_overdue()
-            if forfeited:
-                # UI updates must run on the Tk thread
-                self.after(0, self._refresh_table)
-                self.after(0, self._refresh_balance)
-                self.after(0, self._refresh_history_table)
-                # Optional: toast, if you wired Notifier()
-                if hasattr(self, "notifier"):
-                    self.after(0, lambda: self.notifier.notify("Tasks Forfeited", f"{forfeited} task(s) forfeited."))
 
-            # 2) Monday purge (disk I/O)
-            if storage.purge_history_if_monday():
-                self.after(0, self._refresh_history_table)
+  def _tick_worker(self) -> None:
+      """Runs off the Tk thread. Do I/O here; marshal UI updates with .after()."""
+      try:
+          now = datetime.now()
+          last = getattr(self, "_last_tick", now)
+          self._last_tick = now
 
-            # 3) Lightweight UI state updates
-            self.after(0, self._refresh_add_enabled)
-            self.after(0, self._refresh_window_label)
-        finally:
-            self._tick_worker_running = False
+          # 1) Forfeit overdue tasks (disk I/O)
+          forfeited = self.state.forfeit_overdue()
+          if forfeited:
+              self.after(0, self._refresh_table)
+              self.after(0, self._refresh_balance)
+              self.after(0, self._refresh_history_table)
+              self.after(0, lambda: self.notifier.notify("Tasks Forfeited",
+                                                        f"{forfeited} task(s) forfeited at window end."))
 
+          # 2) Monday purge (disk I/O)
+          if storage.purge_history_if_monday():
+              self.after(0, self._refresh_history_table)
+
+          # 3) Window status + notifications
+          start, end = self.state.window_today()
+          pre_end = end - timedelta(minutes=10)
+
+          # Reset flags each new day
+          today_key = now.strftime("%Y-%m-%d")
+          if getattr(self, "_notified_day_key", None) != today_key:
+              self._notified_day_key = today_key
+              self._notified_open = False
+              self._notified_pre_end = False
+
+          # Fire when crossing start boundary
+          if not self._notified_open and last < start <= now:
+              self._notified_open = True
+              self.after(0, lambda: self.notifier.notify(
+                  "Task window open",
+                  f"You can create tasks until {end.strftime('%I:%M %p').lstrip('0')}."
+              ))
+
+          # Fire when crossing 10-min-before-end boundary
+          if not self._notified_pre_end and last < pre_end <= now:
+              self._notified_pre_end = True
+              self.after(0, lambda: self.notifier.notify(
+                  "10 minutes left",
+                  "Finish or mark tasks complete to avoid forfeits."
+              ))
+
+          # If app starts while already inside the window, notify once
+          if not self._notified_open and start <= now <= end:
+              self._notified_open = True
+              self.after(0, lambda: self.notifier.notify(
+                  "Task window open",
+                  f"You can create tasks until {end.strftime('%I:%M %p').lstrip('0')}."
+              ))
+
+          # Lightweight UI state updates
+          self.after(0, self._refresh_add_enabled)
+          self.after(0, self._refresh_window_label)
+
+      finally:
+          self._tick_worker_running = False
 
     # ---------- Helpers ----------
     def _refresh_all(self) -> None:
@@ -531,6 +595,34 @@ class App(tk.Tk):
 
 
 
+
+    def _hide_to_tray(self) -> None:
+        try:
+            self.withdraw()  # hides window, keeps mainloop alive
+            # Tiny toast to confirm background mode
+            self.notifier.notify("Todo Gamble", "Running in background (tray).")
+        except Exception:
+            self.withdraw()
+
+    def _show_from_tray(self) -> None:
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+
+    def _quit_app(self) -> None:
+        try:
+            self.tray.stop()
+        except Exception:
+            pass
+        self.destroy()
+    def _send_test_notification(self) -> None:
+        try:
+            self.notifier.notify("Test Notification", "If you see this, notifications are working.")
+        except Exception as e:
+            messagebox.showerror("Notification Error", str(e))
 
 
 if __name__ == "__main__":
