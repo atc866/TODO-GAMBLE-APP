@@ -57,7 +57,6 @@ class App(tk.Tk):
         self._last_tick: datetime = datetime.now()
 
         #tray
-        self.tray = TrayManager(self)
         self.tray.start()
 
     # ---------- UI ----------
@@ -294,67 +293,67 @@ class App(tk.Tk):
       self.after(REFRESH_MS, self._tick)
 
 
-  def _tick_worker(self) -> None:
-      """Runs off the Tk thread. Do I/O here; marshal UI updates with .after()."""
-      try:
-          now = datetime.now()
-          last = getattr(self, "_last_tick", now)
-          self._last_tick = now
+    def _tick_worker(self) -> None:
+        """Runs off the Tk thread. Do I/O here; marshal UI updates with .after()."""
+        try:
+            now = datetime.now()
+            last = getattr(self, "_last_tick", now)
+            self._last_tick = now
 
-          # 1) Forfeit overdue tasks (disk I/O)
-          forfeited = self.state.forfeit_overdue()
-          if forfeited:
-              self.after(0, self._refresh_table)
-              self.after(0, self._refresh_balance)
-              self.after(0, self._refresh_history_table)
-              self.after(0, lambda: self.notifier.notify("Tasks Forfeited",
+            # 1) Forfeit overdue tasks (disk I/O)
+            forfeited = self.state.forfeit_overdue()
+            if forfeited:
+                self.after(0, self._refresh_table)
+                self.after(0, self._refresh_balance)
+                self.after(0, self._refresh_history_table)
+                self.after(0, lambda: self.notifier.notify("Tasks Forfeited",
                                                         f"{forfeited} task(s) forfeited at window end."))
 
-          # 2) Monday purge (disk I/O)
-          if storage.purge_history_if_monday():
-              self.after(0, self._refresh_history_table)
+            # 2) Monday purge (disk I/O)
+            if storage.purge_history_if_monday():
+                self.after(0, self._refresh_history_table)
 
-          # 3) Window status + notifications
-          start, end = self.state.window_today()
-          pre_end = end - timedelta(minutes=10)
+            # 3) Window status + notifications
+            start, end = self.state.window_today()
+            pre_end = end - timedelta(minutes=10)
 
-          # Reset flags each new day
-          today_key = now.strftime("%Y-%m-%d")
-          if getattr(self, "_notified_day_key", None) != today_key:
-              self._notified_day_key = today_key
-              self._notified_open = False
-              self._notified_pre_end = False
+            # Reset flags each new day
+            today_key = now.strftime("%Y-%m-%d")
+            if getattr(self, "_notified_day_key", None) != today_key:
+                self._notified_day_key = today_key
+                self._notified_open = False
+                self._notified_pre_end = False
 
-          # Fire when crossing start boundary
-          if not self._notified_open and last < start <= now:
-              self._notified_open = True
-              self.after(0, lambda: self.notifier.notify(
-                  "Task window open",
-                  f"You can create tasks until {end.strftime('%I:%M %p').lstrip('0')}."
-              ))
+            # Fire when crossing start boundary
+            if not self._notified_open and last < start <= now:
+                self._notified_open = True
+                self.after(0, lambda: self.notifier.notify(
+                    "Task window open",
+                    f"You can create tasks until {end.strftime('%I:%M %p').lstrip('0')}."
+                ))
 
-          # Fire when crossing 10-min-before-end boundary
-          if not self._notified_pre_end and last < pre_end <= now:
-              self._notified_pre_end = True
-              self.after(0, lambda: self.notifier.notify(
-                  "10 minutes left",
-                  "Finish or mark tasks complete to avoid forfeits."
-              ))
+            # Fire when crossing 10-min-before-end boundary
+            if not self._notified_pre_end and last < pre_end <= now:
+                self._notified_pre_end = True
+                self.after(0, lambda: self.notifier.notify(
+                    "10 minutes left",
+                    "Finish or mark tasks complete to avoid forfeits."
+                ))
 
-          # If app starts while already inside the window, notify once
-          if not self._notified_open and start <= now <= end:
-              self._notified_open = True
-              self.after(0, lambda: self.notifier.notify(
-                  "Task window open",
-                  f"You can create tasks until {end.strftime('%I:%M %p').lstrip('0')}."
-              ))
+            # If app starts while already inside the window, notify once
+            if not self._notified_open and start <= now <= end:
+                self._notified_open = True
+                self.after(0, lambda: self.notifier.notify(
+                    "Task window open",
+                    f"You can create tasks until {end.strftime('%I:%M %p').lstrip('0')}."
+                ))
 
-          # Lightweight UI state updates
-          self.after(0, self._refresh_add_enabled)
-          self.after(0, self._refresh_window_label)
+            # Lightweight UI state updates
+            self.after(0, self._refresh_add_enabled)
+            self.after(0, self._refresh_window_label)
 
-      finally:
-          self._tick_worker_running = False
+        finally:
+            self._tick_worker_running = False
 
     # ---------- Helpers ----------
     def _refresh_all(self) -> None:
@@ -372,7 +371,7 @@ class App(tk.Tk):
 
     def _insert_task_row(self, t) -> None:
         self.tree.insert("", tk.END, iid=t.id, values=(t.description, f"{t.buy_in:.2f}", f"{t.payout:.2f}"))
-    
+
     def _refresh_history_table(self) -> None:
         # clear table + mapping
         for row in self.h_tree.get_children():
@@ -547,7 +546,7 @@ class App(tk.Tk):
 
         # Other events (refund, reverted_*) — no-op or future support
         messagebox.showinfo("Revert", "This history event type cannot be reverted.")
-    
+
     def _on_purge_data(self) -> None:
         msg = (
             "Purge Data will remove:\n"
