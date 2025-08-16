@@ -67,6 +67,7 @@ jobs:
           name: TodoGamble-dist
           path: dist/
 ```
+
 ## Background mode & notifications (dev on macOS)
 - System tray/menu bar icon appears when the app starts. Closing the window hides it to tray (keeps running).
 - Notifications:
@@ -77,5 +78,8 @@ jobs:
   - A 10-minute-left warning
   - A “Tasks Forfeited” toast at window end if any pending remain
 
+### Finance & Spending
+- **Record Purchase / Withdrawal**: subtract from balance and log to History (`purchase` event).
+- History tab can **filter**: All, Tasks Only, Purchases Only.
+- **Export CSV** of history for budgeting.
 
----
