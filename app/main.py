@@ -6,11 +6,11 @@ from datetime import datetime, timedelta
 import platform, subprocess, os  # already suggested before
 from pathlib import Path
 from datetime import datetime, timedelta
-from .app_state import AppState
-from . import storage
-from .notifications import Notifier
+from app.app_state import AppState
+from app import storage
+from app.notifications import Notifier
 import csv 
-from .tray import TrayManager
+from app.tray import TrayManager
 import threading
 
 
