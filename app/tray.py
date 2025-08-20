@@ -40,10 +40,14 @@ class TrayManager:
                 pystray.MenuItem("Quit", lambda _: self._quit())
             ),
         )
+        self._started = False
 
     def start(self) -> None:
         if not self._icon:
             return
+        if self._started:
+            return
+        self._started = True
         # macOS: prefer non-blocking run if available
         if platform.system() == "Darwin" and hasattr(self._icon, "run_detached"):
             try:
@@ -66,6 +70,8 @@ class TrayManager:
                 self._icon.stop()
         except Exception:
             pass
+        finally:
+            self._started = False
 
     def _quit(self) -> None:
         # Stop tray, then delegate to app quit

@@ -12,9 +12,75 @@ from app.notifications import Notifier
 import csv 
 from app.tray import TrayManager
 import threading
+import sys, socket, threading, ctypes, os
+from ctypes import wintypes
+
+# ---- single-instance primitives (Windows) ----
+MUTEX_NAME = "Global\\TodoGambleSingletonMutex"
+ERROR_ALREADY_EXISTS = 183
+_singleton_mutex = None
+REFRESH_MS = 60 * 1000
+def _acquire_single_instance() -> bool:
+    """Create a named mutex; return False if it already exists."""
+    global _singleton_mutex
+    k32 = ctypes.windll.kernel32
+    k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    k32.CreateMutexW.restype = wintypes.HANDLE
+    handle = k32.CreateMutexW(None, False, MUTEX_NAME)
+    if not handle:
+        return True  # best-effort: if we can’t tell, proceed as primary
+    _singleton_mutex = handle
+    # If the mutex already existed, GetLastError() returns 183
+    last = k32.GetLastError()
+    return last != ERROR_ALREADY_EXISTS
+
+def _release_single_instance() -> None:
+    """Release the named mutex if we own it."""
+    try:
+        if _singleton_mutex:
+            ctypes.windll.kernel32.CloseHandle(_singleton_mutex)
+    except Exception:
+        pass
 
 
-REFRESH_MS = 60 * 1000 
+SINGLE_INSTANCE_PORT = 51337
+_listener_sock = None
+
+def _start_instance_server(app_ref: "App") -> None:
+    """Listen for SHOW commands from secondary launches."""
+    global _listener_sock
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+        s.listen(1)
+        _listener_sock = s
+    except OSError:
+        return  # don’t crash if port not available
+
+    while True:
+        try:
+            conn, _ = s.accept()
+        except OSError:
+            break
+        try:
+            cmd = conn.recv(32)
+            if cmd.startswith(b"SHOW"):
+                app_ref.after(0, app_ref._show_from_tray)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+def _notify_primary_instance() -> None:
+    """Tell the running instance to SHOW itself."""
+    try:
+        s = socket.create_connection(("127.0.0.1", SINGLE_INSTANCE_PORT), timeout=0.5)
+        s.sendall(b"SHOW")
+        s.close()
+    except Exception:
+        pass
 
 class App(tk.Tk):
     def __init__(self) -> None:
@@ -66,7 +132,7 @@ class App(tk.Tk):
         filemenu.add_command(label="Record Purchase…", command=self._on_record_purchase)
         filemenu.add_command(label="Open Data Folder", command=self._open_data_folder) 
         filemenu.add_command(label="Minimize to Tray", command=self._hide_to_tray)
-        filemenu.add_command(label="Exit", command=self.destroy)
+        filemenu.add_command(label="Exit", command=self._quit_app)
         filemenu.add_separator()
         filemenu.add_command(label="Purge Data…", command=self._on_purge_data)          # new
         filemenu.add_command(label="Compact Ledger…", command=self._on_compact_ledger)  # new
@@ -607,6 +673,7 @@ class App(tk.Tk):
             self.deiconify()
             self.lift()
             self.focus_force()
+            self.after(10, self.lift)  # nudge
         except Exception:
             pass
 
@@ -615,6 +682,8 @@ class App(tk.Tk):
             self.tray.stop()
         except Exception:
             pass
+            
+        _release_single_instance()
         self.destroy()
     def _send_test_notification(self) -> None:
         try:
@@ -624,39 +693,16 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    # 1) Named mutex single-instance
+    if not _acquire_single_instance():
+        # A primary instance exists → ask it to show and exit.
+        _notify_primary_instance()
+        sys.exit(0)
 
-
-# =============================
-# File: app/tools/make_icon.py
-# =============================
-from PIL import Image, ImageDraw
-from pathlib import Path
-
-# Quick-and-dirty ICO generator so you have an icon on Windows builds
-# Usage: python app/tools/make_icon.py
-
-def main():
-    dst = Path(__file__).resolve().parents[1] / 'assets' / 'icon.ico'
-    dst.parent.mkdir(parents=True, exist_ok=True)
-
-    # Draw a simple coin-like circle with TG letters
-    img = Image.new('RGBA', (256, 256), (255, 255, 255, 0))
-    d = ImageDraw.Draw(img)
-    d.ellipse((16, 16, 240, 240), outline=(0, 0, 0, 255), width=8, fill=(255, 215, 0, 255))
-    d.text((86, 100), 'TG', fill=(0, 0, 0, 255))
-
-    # Save multiple sizes into ICO
-    sizes = [(256, 256), (128, 128), (64, 64), (32, 32), (16, 16)]
-    imgs = [img.resize(s) for s in sizes]
-    imgs[0].save(dst, format='ICO', sizes=sizes)
-    print(f"Wrote {dst}")
-
-
-if __name__ == '__main__':
     try:
-        from PIL import Image  # type: ignore
-    except Exception:
-        print('This script requires Pillow: pip install Pillow')
-    else:
-        main()
+        app = App()
+        # 2) Start SHOW listener (so future launches can focus us)
+        threading.Thread(target=_start_instance_server, args=(app,), daemon=True).start()
+        app.mainloop()
+    finally:
+        _release_single_instance()
