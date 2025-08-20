@@ -158,6 +158,10 @@ class AppState:
                 result = {"penalized": False, "penalty": 0.0}
 
             # remove from active
+            # mark as deleted to prevent future forfeits
+            t.status = "deleted"
+            self.tasks[i] = t
+            # then actually remove from active list
             self.tasks.pop(i)
             storage.save_tasks(self.tasks)
             return result

@@ -33,7 +33,6 @@ class App(tk.Tk):
             on_show=self._show_from_tray,
             on_quit=self._quit_app
         )
-        self.tray.start()
 
         # Remember what we’ve notified today to avoid duplicates
         self._notified_day_key: str | None = None  # e.g., "2025-08-13"
